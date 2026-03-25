@@ -7,8 +7,7 @@ Ported from v1 app/api/vapi_webhook.py.
 Changes vs v1:
   - SQLModel Session replaced with async Beanie calls throughout.
   - After profile save in _handle_intake, calls embeddings.embed_and_save(user)
-    before find_matches() (Phase 3 stub — wrapped in try/except).
-  - find_matches import wrapped in try/except (Phase 3 will implement it).
+    before find_matches() (Phase 4: real import, no ImportError stub).
   - ConsentRequest.status uses ConsentStatus enum (PENDING/APPROVED/DECLINED)
     instead of v1's boolean consented field.
 
@@ -28,6 +27,7 @@ from app.db.models import (
     User,
     UserRole,
 )
+from app.services import embeddings, matching
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -82,13 +82,12 @@ async def _handle_intake(msg: dict) -> None:
     user.updated_at = datetime.now(timezone.utc)
     await user.save()
 
-    # Phase 3: generate embedding before matching (R-VEC-04)
-    await _try_embed(user)
+    # Phase 4: generate embedding before matching (R-VEC-04)
+    # embed_and_save handles its own errors internally — never blocks the flow.
+    await embeddings.embed_and_save(user)
 
-    # Phase 3: find matches
+    # Phase 4: find matches and initiate consent workflow
     try:
-        from app.services import matching  # noqa: PLC0415
-
         matches = await matching.find_matches(user)
         for match in matches:
             # Initiator (new user via intake) is pre-approved
@@ -113,8 +112,6 @@ async def _handle_intake(msg: dict) -> None:
                     f"Match: {user.phone} ↔ {target.phone} "
                     f"score={match.vector_score:.3f}"
                 )
-    except ImportError:
-        log.warning("matching.py not yet available (Phase 3); skipping match step.")
     except Exception as exc:
         log.error(f"Matching error in vapi_webhook for {phone}: {exc}")
 
@@ -351,23 +348,3 @@ def _export_json(phone: str, structured: dict, summary: str, transcript: str) ->
         log.error(f"Profile export failed: {exc}")
 
 
-# ---------------------------------------------------------------------------
-# Phase 3 stub: embedding generation
-# ---------------------------------------------------------------------------
-
-
-async def _try_embed(user: User) -> None:
-    """
-    Regenerate and persist the user's profile embedding before matching.
-
-    Wrapped in try/except so Phase 2 does not break when embeddings.py
-    does not yet exist (Phase 3 implements it).
-    """
-    try:
-        from app.services import embeddings  # noqa: PLC0415
-
-        await embeddings.embed_and_save(user)
-    except ImportError:
-        log.debug("embeddings.py not yet available (Phase 3); skipping embedding in webhook.")
-    except Exception as exc:
-        log.error(f"Embedding error in vapi_webhook for user {user.id}: {exc}")

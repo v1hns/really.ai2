@@ -6,8 +6,8 @@ Changes vs v1:
   - All transport calls replaced: bot.send_message() → HTTP POST to WA bridge via
     app.services.whatsapp.send_message().
   - All DB reads/writes replaced: SQLModel Session → async Beanie calls.
-  - find_matches import wrapped in try/except (Phase 3 will implement matching.py).
-  - embeddings.embed_and_save called after profile updates (Phase 3 stub).
+  - embeddings.embed_and_save called after profile updates (Phase 4: real import).
+  - matching.find_matches called when state transitions to ACTIVE (Phase 4: real import).
 
 Internal logic preserved verbatim:
   - Conversation state machine: GREETING → ROLE_SELECTION → PROFILE_BUILDING → ACTIVE.
@@ -26,7 +26,7 @@ from app.db.models import (
     User,
     UserRole,
 )
-from app.services import ai, whatsapp
+from app.services import ai, embeddings, matching, whatsapp
 
 log = logging.getLogger(__name__)
 
@@ -123,8 +123,9 @@ async def handle_message(user: User, text: str) -> None:
         if changed:
             user.updated_at = datetime.now(timezone.utc)
             await user.save()
-            # Phase 3: regenerate embedding after profile change
-            await _try_embed(user)
+            # Phase 4: regenerate embedding after profile change.
+            # embed_and_save handles its own errors; never blocks the reply.
+            await embeddings.embed_and_save(user)
 
     # --- Send reply via WhatsApp bridge ------------------------------------
     await whatsapp.send_message(user.chat_id, reply)
@@ -219,24 +220,23 @@ def _apply_profile_update(user: User, update: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Matching trigger (Phase 3 will provide the real implementation)
+# Matching trigger
 # ---------------------------------------------------------------------------
 
 
 async def _run_matching(user: User) -> None:
     """
-    Attempt to find matches for an ACTIVE user.
+    Find matches for an ACTIVE user and initiate the consent workflow for each.
 
-    Wraps the find_matches import in try/except so Phase 2 does not break when
-    matching.py does not yet exist (Phase 3 implements it).
+    Phase 4: uses real embeddings and matching imports — no ImportError guard.
+    Ensures embedding is up-to-date before running vector search.
     """
+    # Ensure embedding is fresh before matching (R-VEC-04)
+    await embeddings.embed_and_save(user)
     try:
-        from app.services import matching  # noqa: PLC0415
         matches = await matching.find_matches(user)
         for match in matches:
             await _handle_new_match(user, match)
-    except ImportError:
-        log.warning("matching.py not yet available (Phase 3); skipping match attempt.")
     except Exception as exc:
         log.error(f"Matching error for {user.chat_id}: {exc}")
 
@@ -313,23 +313,3 @@ async def _request_consent(to_user: User, new_user: User, match_id: str) -> None
             await whatsapp.send_message(to_user.chat_id, consent_msg)
 
 
-# ---------------------------------------------------------------------------
-# Embedding stub (Phase 3 will implement)
-# ---------------------------------------------------------------------------
-
-
-async def _try_embed(user: User) -> None:
-    """
-    Regenerate and persist the user's profile embedding.
-
-    Wrapped in try/except so Phase 2 does not break when embeddings.py
-    does not yet exist (Phase 3 implements it).
-    """
-    try:
-        from app.services import embeddings  # noqa: PLC0415
-
-        await embeddings.embed_and_save(user)
-    except ImportError:
-        log.debug("embeddings.py not yet available (Phase 3); skipping embedding.")
-    except Exception as exc:
-        log.error(f"Embedding error for {user.chat_id}: {exc}")
